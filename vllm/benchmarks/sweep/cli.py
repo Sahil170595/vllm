@@ -4,6 +4,8 @@ import argparse
 
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 
+from .boundary import SweepBoundaryArgs
+from .boundary import main as boundary_main
 from .plot import SweepPlotArgs
 from .plot import main as plot_main
 from .plot_pareto import SweepPlotParetoArgs
@@ -21,6 +23,7 @@ SUBCOMMANDS = (
     (SweepStartupArgs, startup_main),
     (SweepPlotArgs, plot_main),
     (SweepPlotParetoArgs, plot_pareto_main),
+    (SweepBoundaryArgs, boundary_main),
 )
 
 

@@ -259,3 +259,90 @@ vllm bench sweep plot_pareto $EXPERIMENT_DIR \
 
 !!! tip
     You can use `--dry-run` to preview the figures to be plotted.
+
+### Boundary table
+
+`vllm bench sweep boundary` reduces sweep results into a *concurrency-boundary table*: for each workload cell it reports how tail latency amplifies as client concurrency grows relative to the lowest-concurrency baseline (`N=1` by default). The headline metric, `p95_e2el_ms_multiplier_vs_baseline`, is computed per repetition and then averaged across repetitions. Because it is a ratio normalized within each cell, it is more comparable across hardware than absolute tok/s.
+
+This is useful for characterizing *workload-dependent* serving boundaries, e.g. long-decode traffic that stays stable up to high concurrency versus long-prefill or repeated-prefix traffic whose p95 latency amplifies much faster.
+
+#### Collecting the data
+
+Describe the workloads in a `--bench-params` JSON (one entry per workload, each with a unique `_benchmark_name`), and sweep concurrency via `--max-concurrency` in `--bench-cmd`. Keeping concurrency out of `--bench-params` lets `_benchmark_name` stay equal to the workload name, which is what the reducer groups by.
+
+```json
+[
+    {
+        "_benchmark_name": "balanced_2k",
+        "dataset_name": "random",
+        "random_input_len": 2048,
+        "random_output_len": 128,
+        "random_range_ratio": 0.0
+    },
+    {
+        "_benchmark_name": "long_decode",
+        "dataset_name": "random",
+        "random_input_len": 1024,
+        "random_output_len": 512,
+        "random_range_ratio": 0.0
+    },
+    {
+        "_benchmark_name": "long_prefill_8k",
+        "dataset_name": "random",
+        "random_input_len": 8192,
+        "random_output_len": 64,
+        "random_range_ratio": 0.0
+    },
+    {
+        "_benchmark_name": "repeated_prefix",
+        "dataset_name": "prefix_repetition",
+        "prefix_repetition_prefix_len": 1792,
+        "prefix_repetition_suffix_len": 256,
+        "prefix_repetition_num_prefixes": 1,
+        "prefix_repetition_output_len": 128
+    }
+]
+```
+
+```bash
+MODEL=Qwen/Qwen2.5-7B-Instruct
+
+for N in 1 2 4 8 16 32; do
+    vllm bench sweep serve \
+        --serve-cmd "vllm serve $MODEL --enable-prefix-caching" \
+        --bench-cmd "vllm bench serve --model $MODEL --backend vllm --endpoint /v1/completions --num-prompts 320 --ignore-eos --max-concurrency $N --metric-percentiles 50,95,99" \
+        --bench-params benchmarks/boundary_workloads.json \
+        --num-runs 3 \
+        --output-dir benchmarks/results/boundary/n$N \
+        --experiment-name boundary
+done
+```
+
+!!! important
+    Pass `--metric-percentiles 50,95,99` inside `--bench-cmd`. `vllm bench sweep serve` sets `--percentile-metrics` but not `--metric-percentiles`, so the default leaves only `p99_*` columns and the reducer has no p95 to normalize.
+
+!!! important
+    For `repeated_prefix`, the shared prefix only benefits from the cache if prefix caching is on, so set `--enable-prefix-caching` on `--serve-cmd` and `--prefix-repetition-num-prefixes 1` so reuse dominates. Use a long, block-aligned prefix (a multiple of the KV block size, e.g. 1792) — a short prefix gives no measurable cache effect.
+
+!!! note
+    `--max-concurrency` caps the number of in-flight requests (open-loop), which differs from a closed-loop "N concurrent clients" model. Absolute tok/s and wall latency depend on hardware; the N=1-normalized multiplier is the portable signal. Use `--ignore-eos` so decode runs to the target output length.
+
+#### Reducing to a table
+
+Point `vllm bench sweep boundary` at the parent directory; it reads every `summary.json` beneath it.
+
+```bash
+vllm bench sweep boundary benchmarks/results/boundary
+```
+
+This writes `boundary.csv` and prints a table with, per `(workload, concurrency)`: averaged `output_throughput`, p50/p95 wall latency (`*_e2el_ms`), p50/p95 TTFT (`*_ttft_ms`), the `p95_e2el_ms_multiplier_vs_baseline` (and the TTFT equivalent), repetition count, and completed/failed counts.
+
+To also sweep engine knobs, add a `--serve-params` JSON varying `max_num_batched_tokens`, `long_prefill_token_threshold`, and `enable_chunked_prefill`, then group by those columns too:
+
+```bash
+vllm bench sweep boundary benchmarks/results/boundary \
+    --group-by _benchmark_name,max_num_batched_tokens,long_prefill_token_threshold,enable_chunked_prefill
+```
+
+!!! note
+    When sweeping knobs, keep combinations self-consistent: disabling chunked prefill requires `max_num_batched_tokens >= max_model_len`, and `long_prefill_token_threshold` only takes effect when chunked prefill is enabled. Keep `--max-model-len` large enough for the `long_prefill_8k` prompts (≥ 8704).
