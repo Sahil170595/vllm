@@ -64,6 +64,7 @@ from vllm.config import (
     get_attr_docs,
 )
 from vllm.config.cache import (
+    AttnPackSize,
     CacheDType,
     KVOffloadingBackend,
     MambaCacheMode,
@@ -681,6 +682,7 @@ class EngineArgs:
         MambaConfig.enable_stochastic_rounding
     )
     mamba_cache_philox_rounds: int = MambaConfig.stochastic_rounding_philox_rounds
+    attn_pack_size: AttnPackSize = CacheConfig.attn_pack_size
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -1161,6 +1163,7 @@ class EngineArgs:
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
+        cache_group.add_argument("--attn-pack-size", **cache_kwargs["attn_pack_size"])
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
@@ -1773,6 +1776,7 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             mamba_cache_mode=self.mamba_cache_mode,
+            attn_pack_size=self.attn_pack_size,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
