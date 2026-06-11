@@ -261,6 +261,19 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        # Token interval for retained Mamba state checkpoints in align mode,
+        # rounded up to a multiple of the block size (0 = disabled).
+        self.mamba_align_checkpoint_interval = 0
+        if (
+            self.need_mamba_block_aligned_split
+            and self.cache_config.mamba_align_checkpoint_interval is not None
+        ):
+            _block_size = self.cache_config.block_size
+            self.mamba_align_checkpoint_interval = (
+                (self.cache_config.mamba_align_checkpoint_interval + _block_size - 1)
+                // _block_size
+                * _block_size
+            )
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
@@ -346,6 +359,17 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = num_uncached_common_prefix_tokens
                 # keep alignment to block_size
                 num_new_tokens = num_new_tokens // block_size * block_size
+
+            # Checkpoint retention: additionally end the step at the next
+            # checkpoint interval boundary so that the Mamba state at that
+            # position is materialized (and retained by MambaManager) for
+            # prefix-cache reuse by later requests. The interval is a multiple
+            # of block_size, so this preserves block alignment.
+            interval = self.mamba_align_checkpoint_interval
+            if interval > 0:
+                next_checkpoint = (num_computed_tokens // interval + 1) * interval
+                if next_checkpoint < num_computed_tokens + num_new_tokens:
+                    num_new_tokens = next_checkpoint - num_computed_tokens
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:

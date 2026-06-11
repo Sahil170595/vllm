@@ -52,6 +52,9 @@ class MambaBase(AttentionLayerBase):
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
+            align_checkpoint_interval=(
+                vllm_config.cache_config.mamba_align_checkpoint_interval or 0
+            ),
             num_speculative_blocks=(
                 vllm_config.speculative_config.num_speculative_tokens
                 if vllm_config.speculative_config

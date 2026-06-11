@@ -960,6 +960,20 @@ class MambaManager(SingleTypeKVCacheManager):
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
+        # Token interval at which state blocks are retained as prefix-cache
+        # checkpoints in align mode, rounded up to a multiple of block_size
+        # (must match the scheduler's rounding). 0 = retention disabled.
+        self.align_checkpoint_interval = 0
+        if (
+            self.mamba_cache_mode == "align"
+            and kv_cache_spec.align_checkpoint_interval > 0
+        ):
+            block_size = kv_cache_spec.block_size
+            self.align_checkpoint_interval = (
+                (kv_cache_spec.align_checkpoint_interval + block_size - 1)
+                // block_size
+                * block_size
+            )
         if self.mamba_cache_mode == "align":
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -1025,12 +1039,18 @@ class MambaManager(SingleTypeKVCacheManager):
         # that we might actually need.
         num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
 
-        super().remove_skipped_blocks(request_id, num_computed_tokens)
+        if self.align_checkpoint_interval > 0:
+            self._remove_skipped_blocks_keep_checkpoints(
+                request_id, num_computed_tokens
+            )
+        else:
+            super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
             # `last_state_block_idx` refers to the block index allocated two steps ago.
             # The block allocated in the previous step is used to copy Mamba states
             # into the block allocated in the current step; the earlier block is
-            # no longer needed and should be freed here.
+            # no longer needed and should be freed here — unless it is a retained
+            # checkpoint block.
             last_state_block_idx = self.last_state_block_idx.get(request_id)
             # Blocks allocated during prefill may be non-contiguous. Use
             # `last_state_block_idx` to free the appropriate block and replace it
@@ -1039,11 +1059,50 @@ class MambaManager(SingleTypeKVCacheManager):
                 last_state_block_idx is not None
                 and last_state_block_idx
                 < cdiv(num_computed_tokens, self.block_size) - 1
+                and not self._is_checkpoint_block(last_state_block_idx)
             ):
                 blocks = self.req_to_blocks[request_id]
                 if blocks[last_state_block_idx] != self._null_block:
                     self.block_pool.free_blocks([blocks[last_state_block_idx]])
                     blocks[last_state_block_idx] = self._null_block
+
+    def _is_checkpoint_block(self, block_idx: int) -> bool:
+        """Whether the state at this block's end position is a retained
+        prefix-cache checkpoint (align mode with checkpoint retention)."""
+        return (
+            self.align_checkpoint_interval > 0
+            and (block_idx + 1) * self.block_size % self.align_checkpoint_interval
+            == 0
+        )
+
+    def _remove_skipped_blocks_keep_checkpoints(
+        self, request_id: str, total_computed_tokens: int
+    ) -> None:
+        """Variant of the base `remove_skipped_blocks` that retains state
+        blocks at checkpoint positions for prefix-cache reuse.
+
+        The base implementation walks right-to-left and stops at the first
+        null block (its invariant: everything left of a null is null). Retained
+        checkpoints break that invariant, so this walks the full skipped range
+        and skips checkpoint blocks instead of freeing them.
+        """
+        num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
+        if num_skipped_tokens <= 0:
+            return
+        blocks = self.req_to_blocks[request_id]
+        num_skipped_blocks = min(num_skipped_tokens // self.block_size, len(blocks))
+        removed_cached_blocks: list[KVCacheBlock] = []
+        removed_uncached_blocks: list[KVCacheBlock] = []
+        for i in range(num_skipped_blocks - 1, -1, -1):
+            if blocks[i] == self._null_block or self._is_checkpoint_block(i):
+                continue
+            if blocks[i].block_hash is None:
+                removed_uncached_blocks.append(blocks[i])
+            else:
+                removed_cached_blocks.append(blocks[i])
+            blocks[i] = self._null_block
+        self.block_pool.free_blocks(removed_cached_blocks)
+        self.block_pool.free_blocks(removed_uncached_blocks, prepend=True)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """

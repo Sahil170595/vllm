@@ -611,6 +611,7 @@ class MambaSpec(KVCacheSpec):
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
+    align_checkpoint_interval: int = 0
     num_speculative_blocks: int = 0
 
     @property
@@ -631,7 +632,16 @@ class MambaSpec(KVCacheSpec):
                 cdiv(max_model_len, self.block_size) + self.num_speculative_blocks
             ) * self.page_size_bytes
         elif vllm_config.cache_config.mamba_cache_mode == "align":
-            return self.page_size_bytes * (2 + self.num_speculative_blocks)
+            num_checkpoint_blocks = 0
+            if self.align_checkpoint_interval > 0:
+                # One retained state block per checkpoint interval.
+                max_model_len = vllm_config.model_config.max_model_len
+                num_checkpoint_blocks = cdiv(
+                    max_model_len, self.align_checkpoint_interval
+                )
+            return self.page_size_bytes * (
+                2 + num_checkpoint_blocks + self.num_speculative_blocks
+            )
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
 

@@ -139,6 +139,17 @@ class CacheConfig:
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
+    mamba_align_checkpoint_interval: int | None = Field(default=None, gt=0)
+    """Token interval at which Mamba state checkpoints are created and retained
+    for prefix caching in `mamba_cache_mode="align"`. When set, prefill is
+    chunked so that scheduler steps end at every multiple of this interval
+    (rounded up to a multiple of the block size), and the Mamba state blocks at
+    those positions are kept for reuse by later requests with a shared prefix.
+    Without this, align mode retains only the state at the last block boundary
+    before each request's prompt end, so cross-request prefix-cache hits depend
+    on whether that single position happens to fall inside the shared prefix.
+    Costs one extra prefill step and one retained Mamba page per interval.
+    `None` (default) keeps the current single-checkpoint behavior."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
